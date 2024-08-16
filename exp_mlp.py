@@ -57,5 +57,6 @@ mean_lr, std_lr, scale_lr = 1e-06, 0.001, 10
 
 # Proposed Method
 if __name__ == '__main__':
+    #
     model = lambda: MLP(mode='full', mean_lr=mean_lr, gate_lr=scale_lr, scale_lr=std_lr)
     run_experiments_ablation(model, 'mlp_full', window=15, normalization=None)
