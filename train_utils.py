@@ -40,6 +40,45 @@ def lob_epoch_trainer(model, loader, lr=0.0001, optimizer=optim.RMSprop):
     return loss
 
 
+def lob_epoch_trainer_mps(model, loader, lr=0.0001, optimizer=optim.RMSprop):
+    model.train()
+
+    model_optimizer = optimizer([
+        {'params': model.base.parameters()},
+        {'params': model.dean.mean_layer.parameters(), 'lr': lr * model.dean.mean_lr},
+        {'params': model.dean.scaling_layer.parameters(), 'lr': lr * model.dean.scale_lr},
+        {'params': model.dean.gating_layer.parameters(), 'lr': lr * model.dean.gate_lr},
+    ], lr=lr)
+
+    criterion = CrossEntropyLoss()
+    train_loss, counter = 0, 0
+
+    # 'mps' device 설정 (Metal Performance Shaders)
+    device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+    print('On device: ', device)
+
+    model.to(device)
+
+    for (inputs, targets) in loader:
+        model_optimizer.zero_grad()
+
+        # 데이터를 'mps' 또는 'cpu'로 이동
+        inputs, targets = inputs.to(device), targets.to(device)
+        targets = torch.squeeze(targets)
+
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+
+        loss.backward()
+        model_optimizer.step()
+
+        train_loss += loss.item()
+        counter += inputs.size(0)
+
+    loss = (train_loss / counter)
+    return loss
+
+
 def lob_evaluator(model, loader):
     model.eval()
     true_labels = []
@@ -74,7 +113,44 @@ def lob_evaluator(model, loader):
     return metrics
 
 
-def train_evaluate_anchored(model, epoch_trainer=lob_epoch_trainer, evaluator=lob_evaluator,
+def lob_evaluator_mps(model, loader):
+    model.eval()
+    true_labels = []
+    predicted_labels = []
+
+    # 'mps' device 설정 (Metal Performance Shaders)
+    device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+
+    model.to(device)
+
+    for (inputs, targets) in tqdm(loader):
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        with torch.no_grad():  # 'volatile' 대체
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs.data, 1)
+
+        predicted_labels.append(predicted.cpu().numpy())
+        true_labels.append(targets.cpu().numpy())
+
+    true_labels = np.squeeze(np.concatenate(true_labels))
+    predicted_labels = np.squeeze(np.concatenate(predicted_labels))
+
+    precision, recall, f1, _ = precision_recall_fscore_support(true_labels, predicted_labels, average=None)
+    precision_avg, recall_avg, f1_avg, _ = precision_recall_fscore_support(true_labels, predicted_labels,
+                                                                           average='macro')
+    kappa = cohen_kappa_score(true_labels, predicted_labels)
+
+    metrics = {}
+    metrics['accuracy'] = np.sum(true_labels == predicted_labels) / len(true_labels)
+    metrics['precision'], metrics['recall'], metrics['f1'] = precision, recall, f1
+    metrics['precision_avg'], metrics['recall_avg'], metrics['f1_avg'] = precision_avg, recall_avg, f1_avg
+    metrics['kappa'] = kappa
+
+    return metrics
+
+
+def train_evaluate_anchored(model, epoch_trainer=lob_epoch_trainer_mps, evaluator=lob_evaluator_mps,
                             horizon=0, window=5, batch_size=128, train_epochs=20, verbose=True,
                             use_resampling=True, learning_rate=0.0001, splits=[6, 7, 8], normalization='std'):
     """
@@ -97,7 +173,8 @@ def train_evaluate_anchored(model, epoch_trainer=lob_epoch_trainer, evaluator=lo
         train_loader, test_loader = get_wf_lob_loaders(window=window, horizon=horizon, split=i, batch_size=batch_size,
                                                        class_resample=use_resampling, normalization=normalization)
         current_model = model()
-        current_model.cuda()
+        # current_model.cuda()
+        # current_model
         for epoch in range(train_epochs):
             loss = epoch_trainer(model=current_model, loader=train_loader, lr=learning_rate)
             if verbose:
